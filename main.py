@@ -3,6 +3,8 @@ import threading
 import time
 import sys
 import argparse
+import re
+from collections import defaultdict
 
 # Node class for linked list
 class Node:
@@ -16,14 +18,28 @@ class Node:
 list_head = None
 books_heads = {}
 list_lock = threading.Lock()
+connection_count = 0  # Global variable to track connection order
+connection_lock = threading.Lock()  # Lock to safely increment connection count
+
+# Global variables
+last_output_time = 0  # Tracks the last time an output occurred
+output_interval = 5   # Configurable interval for output in seconds
+output_lock = threading.Lock()  # Lock to synchronize output access
 
 def handle_client(conn, addr):
     global list_head
+    global connection_count
     book_head = None
     previous_node = None
     buffer = b''  # Buffer to accumulate data before decoding
 
     print(f"[INFO] Connected by {addr}")
+
+    # Safely increment connection count and get the current connection number
+    with connection_lock:
+        connection_count += 1
+        connection_number = connection_count  # Store the current connection number
+
     total_bytes_received = 0  # Track total bytes received
 
     while True:
@@ -78,43 +94,58 @@ def handle_client(conn, addr):
 
             previous_node = new_node
 
-    # Print the book after receiving all data
-    print(f"[INFO] Printing the book for {addr}...")
-    current_node = books_heads.get(addr)
-    while current_node:
-        print(current_node.line, end='')  # Print each line, end='' to avoid double newlines
-        current_node = current_node.book_next
+    # When the connection is closed, write the book to a file
+    filename = f"book_{connection_number:02d}.txt"  # Generate filename with zero-padded connection number
+    print(f"[INFO] Writing book to file: {filename}")
+    
+    with open(filename, 'w') as book_file:
+        current_node = books_heads.get(addr)
+        while current_node:
+            book_file.write(current_node.line)  # Write each line to the file
+            current_node = current_node.book_next
+
+    print(f"[INFO] Book written to {filename}. Total bytes received: {total_bytes_received}")
 
     conn.close()
-    print(f"[INFO] Connection with {addr} closed. Total bytes received: {total_bytes_received}")
+    print(f"[INFO] Connection with {addr} closed.")
 
+# Dictionary to keep track of frequency of search patterns for each book title
+frequency_dict = {}
 
 def analysis_thread(search_pattern, interval):
+    global last_output_time
+
     while True:
-        time.sleep(interval)  # Periodically check every `interval` seconds
-        pattern_count = {}
-        print(f"[INFO] Analysis thread is searching for pattern '{search_pattern}'...")
-
+        time.sleep(interval)  # Wait for the specified interval
+        now = time.time()
+        
+        # Check if enough time has passed since the last output
+        if now - last_output_time < interval:
+            continue  # Skip if the output interval has not been reached
+        
         with list_lock:
-            for addr, book_head in books_heads.items():
-                count = 0
-                current_node = book_head
-                while current_node:
-                    if search_pattern in current_node.line:  # Fix: Use current_node.line
-                        count += 1
-                    current_node = current_node.book_next
+            # Frequency counting
+            current = list_head
+            frequency_dict.clear()  # Clear the previous counts
 
-                # Store count for each book (by address)
-                pattern_count[addr] = count
+            while current:
+                title = current.line.strip()
+                # Count occurrences of the search pattern in the title
+                match_count = len(re.findall(search_pattern, title, re.IGNORECASE))
+                if match_count > 0:
+                    frequency_dict[title] = frequency_dict.get(title, 0) + match_count
+                current = current.next
+            
+            # Prepare for output
+            sorted_frequencies = sorted(frequency_dict.items(), key=lambda item: item[1], reverse=True)
 
-        # Sort by the highest frequency and print the results
-        sorted_books = sorted(pattern_count.items(), key=lambda x: x[1], reverse=True)
-        print(f"[INFO] Pattern '{search_pattern}' frequency analysis:")
+            # Output to stdout
+            print("[OUTPUT] Book Titles Sorted by Frequency of Search Pattern:")
+            for title, count in sorted_frequencies:
+                print(f"{title}: {count}")
 
-        for addr, count in sorted_books:
-            print(f"[INFO] Book from {addr}: {count} occurrences")
-
-        print(f"[INFO] Finished analysis for this interval.")
+            # Update the last output time
+            last_output_time = now
 
 
 def start_analysis_threads(search_pattern, interval, num_threads=2):
@@ -122,7 +153,6 @@ def start_analysis_threads(search_pattern, interval, num_threads=2):
         thread = threading.Thread(target=analysis_thread, args=(search_pattern, interval))
         thread.daemon = True  # Make the thread a daemon so it terminates when the main program does
         thread.start()
-
 
 def start_server(port):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
