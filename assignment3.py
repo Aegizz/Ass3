@@ -5,6 +5,7 @@ import sys
 import argparse
 import re
 from collections import defaultdict
+import fcntl, os
 
 # Node class for linked list
 class Node:
@@ -45,15 +46,25 @@ def handle_client(conn, addr):
     
     # Main while loop
     while True:
-        data = conn.recv(10024)
-        if not data:
-            print(f"[INFO] Connection closed by {addr}")
-            break
-        #Accumalte lines into the buffer
-        buffer, lines = accumulate_data(buffer, data)
-        # Process each line, using the pointers
-        if lines:
-            previous_node, book_head = process_lines(lines, addr, book_head, previous_node)
+        try:
+            data = conn.recv(10024)
+            if not data:
+                print(f"[INFO] Connection closed by {addr}")
+                break
+            #Accumalte lines into the buffer
+            buffer, lines = accumulate_data(buffer, data)
+            # Process each line, using the pointers
+            if lines:
+                previous_node, book_head = process_lines(lines, addr, book_head, previous_node)
+        except socket.error as e:
+            err = e.args[0]
+            if err == errno.EAGAIN or err == errno.EWOULDBLOCK:
+                print(f"[INFO] Connection closed by {addr}")
+                break
+            else:
+                print(e)
+                break
+
     
     if books_heads[addr]:
         book_head = books_heads[addr]
@@ -195,18 +206,26 @@ def start_analysis_threads(search_pattern, interval, num_threads=2):
         thread.start()
 
 # Start the server and thread handling
-
+import select
 
 def start_server(port):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(('localhost', port))
+    fcntl.fcntl(server, fcntl.F_SETFL, os.O_NONBLOCK)  # Set the server to non-blocking mode
     server.listen(5)
     print(f"Server is listening on port {port}")
 
     while True:
-        conn, addr = server.accept()
-        thread = threading.Thread(target=handle_client, args=(conn, addr))
-        thread.start()
+        try:
+            conn, addr = server.accept()  # Try to accept a new connection
+            thread = threading.Thread(target=handle_client, args=(conn, addr))
+            thread.start()
+        except BlockingIOError:
+            # No pending connections, so we just continue
+            continue
+        except Exception as e:
+            print(f"[ERROR] Server accept failed: {e}")
+            break
 
 
 # Main function with arg parse for input 
