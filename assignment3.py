@@ -32,6 +32,7 @@ def handle_client(conn, addr):
     # define global objects
     global list_head
     global connection_count
+    book_head = None
 
     # Address connected from
     print(f"[INFO] Connected by {addr}")
@@ -39,9 +40,9 @@ def handle_client(conn, addr):
     # Added connection count to function for readability
     connection_number = increment_connection_count()  # Get the current connection number
     
-    book_head, previous_node = None, None # Initiliase pointers
+    previous_node = None, None # Initiliase pointers
     buffer = b''  # Buffer to accumulate data
-
+    
     # Main while loop
     while True:
         data = conn.recv(1024)
@@ -52,10 +53,12 @@ def handle_client(conn, addr):
         buffer, lines = accumulate_data(buffer, data)
         # Process each line, using the pointers
         if lines:
-            previous_node = process_lines(lines, addr, book_head, previous_node)
-
+            previous_node, book_head = process_lines(lines, addr, book_head, previous_node)
+    
+    if books_heads[addr]:
+        book_head = books_heads[addr]
     # Write book to a file when the connection closes using the connection number
-    write_book_to_file(addr, connection_number)
+    write_book_to_file(addr, connection_number, book_head)
 
     conn.close()
     print(f"[INFO] Connection with {addr} closed.")
@@ -73,13 +76,22 @@ def accumulate_data(buffer, data):
     print(f"[DEBUG] Received {len(data)} bytes, total: {len(buffer)} bytes")
 
     try:
-        # Decode complete buffer
-        lines = buffer.decode().splitlines(keepends=True)
-        print(f"[DEBUG] Successfully decoded {len(lines)} lines")
-        return b'', lines  # Reset buffer and return lines
+        # Try to decode the buffer, but handle incomplete data at the end
+        decoded_data = buffer.decode('utf-8')
+        lines = decoded_data.splitlines(keepends=True)  # Split into lines, keeping newlines
+        # Check if the last line is complete (it should end with a newline character)
+        if not lines[-1].endswith('\n'):
+            # Incomplete last line, keep it in the buffer
+            buffer = lines[-1].encode('utf-8')  # Re-encode incomplete line into buffer
+            lines = lines[:-1]  # Remove the incomplete line from lines to be processed
+        else:
+            buffer = b''  # All lines are complete, clear the buffer
+        print(f"[DEBUG] Successfully decoded {len(lines)} complete lines")
+        return buffer, lines  # Return the remaining buffer and processed lines
     except UnicodeDecodeError as e:
         print(f"[WARNING] Incomplete UTF-8 sequence detected: {e}, waiting for more data")
         return buffer, []  # Return buffer and empty list if decode fails
+
 
 # Add each processed line to the list
 def process_lines(lines, addr, book_head, previous_node):
@@ -112,16 +124,18 @@ def process_lines(lines, addr, book_head, previous_node):
 
             previous_node = new_node
 
-    return previous_node
+    return previous_node, book_head
 
 # Write the resultant book to a file when completed.
-def write_book_to_file(addr, connection_number):
+def write_book_to_file(addr, connection_number, book_head):
     filename = f"book_{connection_number:02d}.txt"
     print(f"[INFO] Writing book to file: {filename}")
-
+    for book in books_heads:
+        print(f"[INFO] Current book heads: {book}")
     with open(filename, 'w') as book_file:
         current_node = books_heads.get(addr)
         while current_node:
+            print(current_node.line)
             book_file.write(current_node.line)
             current_node = current_node.book_next
 
@@ -148,24 +162,31 @@ def analysis_thread(search_pattern, interval):
 # This covers edge cases where there is a key error if you try to access a new item not in the dictionary (defaultdict simply adds it)
 def count_frequencies(search_pattern):
     frequency_dict = defaultdict(int)
-    current = list_head
 
-    while current:
-        title = current.line.strip()
-        # Use regex to find the pattern (ooooh regex scary!!!!)
-        match_count = len(re.findall(search_pattern, title, re.IGNORECASE))
-        if match_count > 0:
-            frequency_dict[title] += match_count
-        current = current.next
+    # Iterate over each book linked list in books_heads
+    for addr, book in books_heads.items():  # addr is the key, book is the head of the book linked list
+        current_node = book
+        
+        while current_node:
+            line_content = current_node.line.strip()
+            
+            # Use regex to find the pattern in the entire line (case-insensitive)
+            match_count = len(re.findall(search_pattern, line_content, re.IGNORECASE))
+            
+            if match_count > 0:
+                frequency_dict[addr] += match_count  # Increment count for this book (by address)
+
+            current_node = current_node.book_next  # Move to the next node in the book list
     
     return frequency_dict
+
 
 # Output frequencies of each book by printing title and count
 def output_frequencies(frequency_dict):
     sorted_frequencies = sorted(frequency_dict.items(), key=lambda item: item[1], reverse=True)
     print("[OUTPUT] Book Titles Sorted by Frequency of Search Pattern:")
     for title, count in sorted_frequencies:
-        print(f"{title}: {count}")
+        print(f"{books_heads[title].line.rstrip()}: {count}")
 
 # Simple thread starter
 def start_analysis_threads(search_pattern, interval, num_threads=2):
@@ -175,6 +196,8 @@ def start_analysis_threads(search_pattern, interval, num_threads=2):
         thread.start()
 
 # Start the server and thread handling
+
+
 def start_server(port):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind(('localhost', port))
@@ -186,7 +209,8 @@ def start_server(port):
         thread = threading.Thread(target=handle_client, args=(conn, addr))
         thread.start()
 
-# Main function with arg parse for input
+
+# Main function with arg parse for input 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start the server with a port and search pattern.")
     parser.add_argument('-l', '--port', type=int, required=True, help="Port number to listen on")
