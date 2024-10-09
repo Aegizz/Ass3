@@ -45,7 +45,7 @@ def handle_client(conn, addr):
     
     # Main while loop
     while True:
-        data = conn.recv(1024)
+        data = conn.recv(10024)
         if not data:
             print(f"[INFO] Connection closed by {addr}")
             break
@@ -135,7 +135,6 @@ def write_book_to_file(addr, connection_number, book_head):
     with open(filename, 'w') as book_file:
         current_node = books_heads.get(addr)
         while current_node:
-            print(current_node.line)
             book_file.write(current_node.line)
             current_node = current_node.book_next
 
